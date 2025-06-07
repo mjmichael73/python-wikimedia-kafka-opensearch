@@ -10,6 +10,17 @@ services:
       - broker
     networks:
       - pwko-net
+  consumer-app:
+    build:
+      context: ./consumer
+      dockerfile: Dockerfile
+    container_name: consumer-app
+    volumes:
+      - ./consumer:/app
+    depends_on:
+      - broker
+    networks:
+      - pwko-net
   broker:
     image: apache/kafka:latest
     container_name: broker
@@ -90,6 +101,7 @@ services:
 volumes:
   opensearch-data1:
   opensearch-data2:
+
 
 networks:
   pwko-net:
