@@ -1,0 +1,14 @@
+services:
+  producer-app:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    container_name: producer-app
+    volumes:
+      - ./producer:/app
+    networks:
+      - pwko-net
+
+networks:
+  pwko-net:
+    driver: bridge
