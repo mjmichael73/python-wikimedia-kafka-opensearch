@@ -1,0 +1,6 @@
+# Dev / CI: pip install -r requirements-dev.txt
+pytest>=8.0
+testcontainers[kafka]>=4.8.0
+kafka-python
+opensearch-py
+prometheus_client

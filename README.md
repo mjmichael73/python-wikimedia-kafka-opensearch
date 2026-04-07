@@ -206,8 +206,11 @@ After `docker compose up`, open Grafana → **Dashboards** (folder *General*, ta
 
 ```
 ├── .env.example          # Documented defaults; copy to `.env` to customize
-├── docker-compose.yml    # Full stack + Prometheus + Grafana
-├── Makefile              # up_clean, up, down, clean, ps
+├── docker-compose.yml    # Full stack + Prometheus + Grafana + test-runner (profile test)
+├── Dockerfile.test       # Python 3.11 test image (requirements-dev.txt)
+├── Makefile              # up_clean, up, down, clean, ps, test, test-integration
+├── requirements-dev.txt  # pytest, testcontainers, app libs for tests
+├── tests/                # Unit + integration (Testcontainers) tests
 ├── monitoring/
 │   ├── prometheus/
 │   │   └── prometheus.yml   # Scrape producer-app + consumer-app :8080/metrics
@@ -221,6 +224,7 @@ After `docker compose up`, open Grafana → **Dashboards** (folder *General*, ta
 │   └── requirements.txt   # kafka-python, prometheus_client, requests, sseclient-py
 └── consumer/
     ├── Dockerfile
+    ├── document_id.py     # OpenSearch _id logic (used by main + unit tests)
     ├── main.py
     ├── observability.py
     ├── wikimedia_mappings.py  # Index template + mapping for recentchange
@@ -229,6 +233,27 @@ After `docker compose up`, open Grafana → **Dashboards** (folder *General*, ta
 
 Both apps use **Python 3.11** slim images and mount their source directories for quick iteration.
 
+## Testing
+
+Tests run **inside Docker** via the Compose service **`test-runner`** (profile **`test`**) so the runtime matches the apps and **integration** tests can use [Testcontainers](https://testcontainers.com/) against the host Docker daemon.
+
+| Command | Purpose |
+|---------|---------|
+| `make test` | Unit tests only (`pytest` without `--integration`; fast). |
+| `make test-integration` | All tests including integration (**Kafka + OpenSearch** containers; needs a working Docker socket). |
+| `make test-build` | Build the `test-runner` image only. |
+
+Equivalent Compose invocations:
+
+```bash
+docker compose --profile test run --rm test-runner pytest tests/ -v
+docker compose --profile test run --rm test-runner pytest tests/ -v --integration
+```
+
+The **`test-runner`** service mounts the repo at **`/app`**, the Docker socket at **`/var/run/docker.sock`**, and sets **`TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal`** with **`host.docker.internal:host-gateway`** so Testcontainers-published ports are reachable from inside the test container on Linux.
+
+Dev dependencies are listed in **`requirements-dev.txt`**; the image is defined by **`Dockerfile.test`**. Running `pytest` directly on the host is possible if you install `requirements-dev.txt` locally, but **`make test`** is the supported path.
+
 ## Troubleshooting
 
 - **Mapping did not update after upgrading** — Indices keep their original mapping. For example: `curl -X DELETE "http://localhost:9200/wikimedia-changes"` (adjust if you changed `OPENSEARCH_INDEX`), then `docker compose restart consumer-app` so the index is recreated with the explicit mapping.
@@ -236,13 +261,13 @@ Both apps use **Python 3.11** slim images and mount their source directories for
 - **No documents in OpenSearch** — Confirm `consumer-app` is running (`docker compose ps` or `make ps`). Confirm Wikimedia stream is reachable from the producer container.
 - **Out of memory** — Reduce `OPENSEARCH_JAVA_OPTS` in `docker-compose.yml` or run a single OpenSearch node for lighter setups.
 - **Producer observability URL not reachable** — The producer container may **exit** when the Wikimedia SSE stream closes or errors; host port **8080** is only served while the process is running. The consumer stays up longer and is easier to probe on **8081**.
+- **Integration tests fail inside `test-runner`** — Ensure the Docker socket is mounted (Compose does this) and that **`host.docker.internal` resolves (Linux: `extra_hosts: host-gateway`)**. Testcontainers needs permission to create sibling containers.
 
 ## TODO / improvement proposals
 
 Ideas to evolve this demo into something sturdier or closer to production patterns:
 
-- **Testing:** Add unit tests for serialization/deserialization and integration tests against Kafka/OpenSearch (e.g. Testcontainers).
-- **CI:** Linting (ruff/black), type hints (mypy), and a GitHub Action (or similar) that builds images and runs tests.
+- **CI:** Linting (ruff/black), type hints (mypy), and a GitHub Action (or similar) that builds images and runs **`make test`** / **`make test-integration`**.
 - **Security:** Document a “secure mode” path enabling OpenSearch security plugin, TLS, and auth—separate from this educational default.
 - **Operations:** Document backup/restore of OpenSearch volumes; add a minimal `docker compose` profile for single-node OpenSearch for low-RAM machines.
 

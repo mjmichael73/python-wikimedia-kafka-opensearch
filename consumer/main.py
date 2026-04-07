@@ -7,6 +7,7 @@ from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 from kafka.structs import OffsetAndMetadata
 from opensearchpy import OpenSearch
 
+from document_id import opensearch_document_id as resolve_document_id
 from observability import (
     configure_logging,
     consumer_dlq_total,
@@ -141,22 +142,7 @@ def connect_opensearch(log: logging.Logger):
 
 
 def opensearch_document_id(doc: dict, message) -> str:
-    """
-    Choose a stable OpenSearch _id: WMF meta.id (event UUID), else recentchange id
-    (rcid), else Kafka topic/partition/offset so every consumed record is indexable.
-    """
-    meta = doc.get("meta")
-    if isinstance(meta, dict):
-        mid = meta.get("id")
-        if mid is not None and str(mid).strip() != "":
-            return str(mid)
-    rid = doc.get("id")
-    if rid is not None:
-        return str(rid)
-    topic = getattr(message, "topic", None) or KAFKA_TOPIC
-    partition = message.partition
-    offset = message.offset
-    return f"kafka:{topic}:{partition}:{offset}"
+    return resolve_document_id(doc, message, kafka_topic_fallback=KAFKA_TOPIC)
 
 
 def main():
