@@ -133,6 +133,8 @@ Tunables are read from the process environment. Defaults match the previous hard
 | Variable | Apps | Default | Purpose |
 |----------|------|---------|---------|
 | `WIKIMEDIA_STREAM_URL` | Producer | `https://stream.wikimedia.org/v2/stream/recentchange` | Wikimedia SSE endpoint. |
+| `WIKIMEDIA_HTTP_USER_AGENT` | Producer | *(see compose default)* | **Required** to be descriptive per [Wikimedia User-Agent policy](https://meta.wikimedia.org/wiki/User-Agent_policy); generic `python-requests/...` is blocked (**403**). Default string identifies this demo; set your project URL in `.env` for serious use. |
+| `WIKIMEDIA_SSE_RECONNECT_DELAY_SECONDS` | Producer | `5` | Sleep before reconnecting after the SSE stream closes or a connection error (Wikimedia often ends long-lived connections). |
 | `KAFKA_BOOTSTRAP_SERVERS` | Both | `broker:9092` | Kafka brokers (comma-separated `host:port`). Use `broker:9092` inside this Compose network. |
 | `KAFKA_TOPIC` | Both | `wikimedia.recentchange` | Topic name. |
 | `KAFKA_CONSUMER_GROUP` | Consumer | `wikimedia-consumer-group` | Kafka consumer group id. |
@@ -329,8 +331,9 @@ Dev dependencies are listed in **`requirements-dev.txt`**; the image is defined 
 - **Mapping did not update after upgrading** — Indices keep their original mapping. For example: `curl -X DELETE "http://localhost:9200/wikimedia-changes"` (adjust if you changed `OPENSEARCH_INDEX`), then `docker compose restart consumer-app` so the index is recreated with the explicit mapping.
 - **Consumer logs “OpenSearch not available”** — Compose should wait until both OpenSearch nodes report green/yellow before the consumer starts; if you still see this, the cluster may be slow or unhealthy—check `docker compose ps` and `curl -s http://localhost:9200/_cluster/health?pretty`. The consumer also retries in code.
 - **No documents in OpenSearch** — Confirm `consumer-app` is running (`docker compose ps` or `make ps`). Confirm Wikimedia stream is reachable from the producer container.
+- **Producer logs `403 Forbidden` from `stream.wikimedia.org`** — Wikimedia requires a [descriptive `User-Agent`](https://meta.wikimedia.org/wiki/User-Agent_policy). This stack sets **`WIKIMEDIA_HTTP_USER_AGENT`** in **`docker-compose.yml`**; override in **`.env`** with your project or contact URL if needed.
 - **Out of memory** — Reduce `OPENSEARCH_JAVA_OPTS` in `docker-compose.yml` or run a single OpenSearch node for lighter setups.
-- **Producer observability URL not reachable** — The producer container may **exit** when the Wikimedia SSE stream closes or errors; host port **8080** is only served while the process is running. The consumer stays up longer and is easier to probe on **8081**.
+- **Producer observability URL not reachable** — The producer **reconnects** when the Wikimedia SSE stream closes (common) or after network errors; if it still never listens on **8080**, check `docker compose logs producer-app` and confirm the process is not stuck creating the Kafka client. The consumer stays up longer and is easier to probe on **8081**.
 - **Integration tests fail inside `test-runner`** — Ensure the Docker socket is mounted (Compose does this) and that **`host.docker.internal` resolves (Linux: `extra_hosts: host-gateway`)**. Testcontainers needs permission to create sibling containers.
 
 Contributions that tackle items above are welcome if you fork or extend this repository.
