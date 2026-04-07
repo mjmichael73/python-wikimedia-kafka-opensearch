@@ -30,6 +30,13 @@ def _env_int(name: str, default: int) -> int:
     return int(raw)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "wikimedia.recentchange")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "broker:9092")
 KAFKA_CONSUMER_GROUP = os.getenv("KAFKA_CONSUMER_GROUP", "wikimedia-consumer-group")
@@ -37,6 +44,16 @@ KAFKA_DLQ_TOPIC = os.getenv("KAFKA_DLQ_TOPIC", "wikimedia.recentchange.dlq").str
 OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "opensearch-node1")
 OPENSEARCH_PORT = _env_int("OPENSEARCH_PORT", 9200)
 OPENSEARCH_INDEX = os.getenv("OPENSEARCH_INDEX", "wikimedia-changes")
+OPENSEARCH_USE_SSL = _env_bool("OPENSEARCH_USE_SSL", False)
+OPENSEARCH_USER = os.getenv("OPENSEARCH_USER", "").strip()
+OPENSEARCH_PASSWORD = os.getenv("OPENSEARCH_PASSWORD", "")
+OPENSEARCH_CA_CERTS = os.getenv("OPENSEARCH_CA_CERTS", "").strip()
+_raw_verify = os.getenv("OPENSEARCH_VERIFY_CERTS")
+if _raw_verify is None or _raw_verify.strip() == "":
+    OPENSEARCH_VERIFY_CERTS = OPENSEARCH_USE_SSL
+else:
+    OPENSEARCH_VERIFY_CERTS = _env_bool("OPENSEARCH_VERIFY_CERTS", True)
+OPENSEARCH_SSL_ASSERT_HOSTNAME = _env_bool("OPENSEARCH_SSL_ASSERT_HOSTNAME", True)
 KAFKA_CLIENT_RETRY_MAX_ATTEMPTS = _env_int("KAFKA_CLIENT_RETRY_MAX_ATTEMPTS", 10)
 KAFKA_CLIENT_RETRY_DELAY_SECONDS = _env_int("KAFKA_CLIENT_RETRY_DELAY_SECONDS", 5)
 OPENSEARCH_RETRY_MAX_ATTEMPTS = _env_int("OPENSEARCH_RETRY_MAX_ATTEMPTS", 20)
@@ -111,12 +128,17 @@ def connect_opensearch(log: logging.Logger):
     for _ in range(OPENSEARCH_RETRY_MAX_ATTEMPTS):
         try:
             log.info("Connecting to OpenSearch", extra={"event": "opensearch_connect"})
-            client = OpenSearch(
-                hosts=[{"host": OPENSEARCH_HOST, "port": OPENSEARCH_PORT}],
-                use_ssl=False,
-                verify_certs=False,
-                scheme="http",
-            )
+            http_auth = (OPENSEARCH_USER, OPENSEARCH_PASSWORD) if OPENSEARCH_USER else None
+            client_kwargs: dict = {
+                "hosts": [{"host": OPENSEARCH_HOST, "port": OPENSEARCH_PORT}],
+                "use_ssl": OPENSEARCH_USE_SSL,
+                "verify_certs": OPENSEARCH_VERIFY_CERTS,
+                "ssl_assert_hostname": OPENSEARCH_SSL_ASSERT_HOSTNAME,
+                "http_auth": http_auth,
+            }
+            if OPENSEARCH_CA_CERTS:
+                client_kwargs["ca_certs"] = OPENSEARCH_CA_CERTS
+            client = OpenSearch(**client_kwargs)
             client.indices.put_index_template(
                 name=WIKIMEDIA_INDEX_TEMPLATE_NAME,
                 body=wikimedia_recentchange_index_template_body(),

@@ -140,6 +140,12 @@ Tunables are read from the process environment. Defaults match the previous hard
 | `OPENSEARCH_HOST` | Consumer | `opensearch-node1` | OpenSearch hostname (compose service name). |
 | `OPENSEARCH_PORT` | Consumer | `9200` | OpenSearch HTTP port. |
 | `OPENSEARCH_INDEX` | Consumer | `wikimedia-changes` | Target index (created if missing). |
+| `OPENSEARCH_USE_SSL` | Consumer | `false` | Use HTTPS to OpenSearch (**required** when the security plugin terminates TLS on the REST port). |
+| `OPENSEARCH_USER` | Consumer | *(empty)* | HTTP basic-auth username when security is enabled. |
+| `OPENSEARCH_PASSWORD` | Consumer | *(empty)* | HTTP basic-auth password (pair with **`OPENSEARCH_USER`**). |
+| `OPENSEARCH_VERIFY_CERTS` | Consumer | `true` when **`OPENSEARCH_USE_SSL`** is set | Whether to verify the server TLS certificate. |
+| `OPENSEARCH_CA_CERTS` | Consumer | *(empty)* | Path **inside the consumer container** to a PEM CA bundle (enables verification of a private CA). |
+| `OPENSEARCH_SSL_ASSERT_HOSTNAME` | Consumer | `true` | Certificate hostname verification; set **`false`** only when the cert’s SAN/CN does not match **`OPENSEARCH_HOST`** (common in Compose without per-service certs). |
 | `KAFKA_CLIENT_RETRY_MAX_ATTEMPTS` | Both | `10` | Max attempts to create Kafka producer/consumer. |
 | `KAFKA_CLIENT_RETRY_DELAY_SECONDS` | Both | `5` | Sleep between Kafka connection retries (seconds). |
 | `OPENSEARCH_RETRY_MAX_ATTEMPTS` | Consumer | `20` | Max attempts to connect and prepare the index. |
@@ -201,6 +207,63 @@ Implementation lives in **`producer/observability.py`** and **`consumer/observab
 | **PWKO — Scrape health** | `monitoring/grafana/dashboards/pwko-scrape-health.json` | Scrape latency and a table of target **up** state. |
 
 After `docker compose up`, open Grafana → **Dashboards** (folder *General*, tags `pwko`). Edit the JSON under `monitoring/grafana/dashboards/` and restart Grafana or use **Save** (with **allowUiUpdates** enabled in provisioning) to iterate.
+
+## OpenSearch secure mode (TLS and auth)
+
+The default stack is intentionally **insecure for teaching**: both OpenSearch nodes set **`plugins.security.disabled=true`**, **skip demo security material** (`DISABLE_INSTALL_DEMO_CONFIG=true`), and **OpenSearch Dashboards** sets **`DISABLE_SECURITY_DASHBOARDS_PLUGIN=true`**. REST calls use **plaintext HTTP** on port **9200** inside the network; the consumer uses **`OPENSEARCH_USE_SSL=false`** and no credentials.
+
+Moving toward **TLS + authentication** is a separate path: **do not** flip these flags on an index volume that was created with security off and expect a smooth upgrade—plan for **new data directories** (or a [snapshot restore](https://opensearch.org/docs/latest/migrating-to-opensearch/snapshot-restore/)) and follow **[OpenSearch security](https://docs.opensearch.org/latest/security/)** documentation for your target environment.
+
+### 1. OpenSearch nodes (`opensearch-node1` / `opensearch-node2`)
+
+In **`docker-compose.yml`**, for **each** OpenSearch service:
+
+1. **Remove** the line **`plugins.security.disabled=true`** so the security plugin loads.
+2. **Allow demo security configuration** (suitable **only** for lab / proof-of-concept): replace **`DISABLE_INSTALL_DEMO_CONFIG=true`** with **`DISABLE_INSTALL_DEMO_CONFIG=false`**, **or** delete that variable and rely on the image default so the demo installer can run.
+3. Set an **initial admin password** as required by your image version (see [Installing OpenSearch with Docker](https://docs.opensearch.org/latest/install-and-configure/install-opensearch/docker/)). Many 2.x images expect **`OPENSEARCH_INITIAL_ADMIN_PASSWORD`** (strong password); behavior changed across minor releases, so confirm in the docs for **`opensearchproject/opensearch:2.17.1`** and check container logs if bootstrap fails.
+4. **Inter-node TLS and transport** are part of a full secure cluster; the stock **demo configuration** often generates node and client certificates so the two-node cluster can form a quorum. For **production**, replace demo material with certificates from your PKI and audit **[security configuration files](https://docs.opensearch.org/latest/security/configuration/)** (`opensearch.yml`, `config.yml`, roles, etc.)—that is out of scope for this repo; treat the steps below as a **roadmap**, not a production hardening guide.
+
+**REST becomes HTTPS** on **9200** once TLS is enabled. Update **healthchecks** from `curl http://127.0.0.1:9200/...` to **HTTPS**, for example:
+
+```bash
+curl -sf -u "$ADMIN_USER:$ADMIN_PASSWORD" --cacert /usr/share/opensearch/config/root-ca.pem "https://127.0.0.1:9200/_cluster/health"
+```
+
+Use **`curl -k`** only for quick debugging; prefer mounting the CA and verifying certs in real setups.
+
+### 2. OpenSearch Dashboards (`opensearch-dashboards`)
+
+1. **Stop disabling** the security integration: remove **`DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"`** (or set it to **`false`** if your image documents that explicitly).
+2. Point **`OPENSEARCH_HOSTS`** at **`https://`** backends, e.g. `["https://opensearch-node1:9200","https://opensearch-node2:9200"]`.
+3. Provide credentials the Dashboards process uses to talk to OpenSearch—see **[OpenSearch Dashboards Docker](https://docs.opensearch.org/latest/install-and-configure/install-dashboards/docker/)** for **`OPENSEARCH_USERNAME`**, **`OPENSEARCH_PASSWORD`**, and TLS-related settings (for example trusting the OpenSearch HTTP CA).
+
+You will log in to the **5601** UI with a dashboard user defined in your security configuration (not necessarily the same as the **admin** transport user).
+
+### 3. Python consumer (`consumer-app`)
+
+The consumer’s OpenSearch client reads TLS and auth from the environment (see the table in **Configuration**). For a **demo** HTTPS endpoint with a **self-signed** cert and **basic auth** from inside Compose, typical settings are:
+
+| Variable | Example (demo / dev only) |
+|----------|---------------------------|
+| **`OPENSEARCH_USE_SSL`** | `true` |
+| **`OPENSEARCH_USER`** | Administrative or REST user allowed to create indices |
+| **`OPENSEARCH_PASSWORD`** | Matching password |
+| **`OPENSEARCH_VERIFY_CERTS`** | `false` *temporary* shortcut if you do not mount a CA (**prefer** `true` + **`OPENSEARCH_CA_CERTS`**) |
+| **`OPENSEARCH_SSL_ASSERT_HOSTNAME`** | `false` if the certificate is issued for a hostname other than **`OPENSEARCH_HOST`** |
+
+Mount your CA PEM into the consumer container (read-only volume) and set **`OPENSEARCH_CA_CERTS`** to that path when you move past ad hoc `-k`-style setups.
+
+### 4. Host-side curls and bookmarks
+
+Replace **`http://localhost:9200`** with **`https://localhost:9200`**, pass **`-u user:pass`**, and add **`--cacert`** (or **`curl -k`** only for local experiments). Dashboards: **`https://localhost:5601`** once TLS is enabled there as well (exact URL depends on how you terminate TLS in front of Dashboards).
+
+### 5. Kafka, Prometheus, and Grafana
+
+This “secure mode” section only covers **OpenSearch + Dashboards + consumer indexing**. **Kafka** still runs **PLAINTEXT** in the default compose file; **Prometheus** scrapes **`http://.../metrics`** on the apps. Locking those down (TLS, SASL, network policies, reverse proxies) is a separate exercise.
+
+---
+
+**Summary:** keep the **default compose** for learning; fork the compose file (or maintain a private override) for **security-enabled OpenSearch**, wire **Dashboards** to **HTTPS + auth**, and set **`OPENSEARCH_*`** on **`consumer-app`** so **`opensearch-py`** uses **HTTPS** and **basic auth**. For anything beyond lab demo certificates, follow the official **security** and **installation** guides and your organization’s PKI and secrets practices.
 
 ## Project layout
 
@@ -269,13 +332,5 @@ Dev dependencies are listed in **`requirements-dev.txt`**; the image is defined 
 - **Out of memory** — Reduce `OPENSEARCH_JAVA_OPTS` in `docker-compose.yml` or run a single OpenSearch node for lighter setups.
 - **Producer observability URL not reachable** — The producer container may **exit** when the Wikimedia SSE stream closes or errors; host port **8080** is only served while the process is running. The consumer stays up longer and is easier to probe on **8081**.
 - **Integration tests fail inside `test-runner`** — Ensure the Docker socket is mounted (Compose does this) and that **`host.docker.internal` resolves (Linux: `extra_hosts: host-gateway`)**. Testcontainers needs permission to create sibling containers.
-
-## TODO / improvement proposals
-
-Ideas to evolve this demo into something sturdier or closer to production patterns:
-
-- **CI:** Further automation (e.g. image scan, publish to a registry) on top of [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
-- **Security:** Document a “secure mode” path enabling OpenSearch security plugin, TLS, and auth—separate from this educational default.
-- **Operations:** Document backup/restore of OpenSearch volumes; add a minimal `docker compose` profile for single-node OpenSearch for low-RAM machines.
 
 Contributions that tackle items above are welcome if you fork or extend this repository.
