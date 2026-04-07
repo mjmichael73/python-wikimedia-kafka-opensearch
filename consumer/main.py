@@ -1,35 +1,51 @@
 import json
+import os
 import time
+
 from kafka import KafkaConsumer
 from opensearchpy import OpenSearch
 
-KAFKA_TOPIC = "wikimedia.recentchange"
-KAFKA_BROKERS = "broker:9092"
-OPENSEARCH_HOST = "opensearch-node1"
-OPENSEARCH_INDEX = "wikimedia-changes"
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return int(raw)
+
+
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "wikimedia.recentchange")
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "broker:9092")
+KAFKA_CONSUMER_GROUP = os.getenv("KAFKA_CONSUMER_GROUP", "wikimedia-consumer-group")
+OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "opensearch-node1")
+OPENSEARCH_PORT = _env_int("OPENSEARCH_PORT", 9200)
+OPENSEARCH_INDEX = os.getenv("OPENSEARCH_INDEX", "wikimedia-changes")
+KAFKA_CLIENT_RETRY_MAX_ATTEMPTS = _env_int("KAFKA_CLIENT_RETRY_MAX_ATTEMPTS", 10)
+KAFKA_CLIENT_RETRY_DELAY_SECONDS = _env_int("KAFKA_CLIENT_RETRY_DELAY_SECONDS", 5)
+OPENSEARCH_RETRY_MAX_ATTEMPTS = _env_int("OPENSEARCH_RETRY_MAX_ATTEMPTS", 20)
+OPENSEARCH_RETRY_DELAY_SECONDS = _env_int("OPENSEARCH_RETRY_DELAY_SECONDS", 5)
 
 
 def create_consumer():
-    for _ in range(10):
+    for _ in range(KAFKA_CLIENT_RETRY_MAX_ATTEMPTS):
         try:
             return KafkaConsumer(
                 KAFKA_TOPIC,
-                bootstrap_servers=KAFKA_BROKERS,
+                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
                 value_deserializer=lambda m: json.loads(m.decode("utf-8")),
                 auto_offset_reset="latest",
-                group_id="wikimedia-consumer-group",
+                group_id=KAFKA_CONSUMER_GROUP,
             )
         except Exception:
             print("Kafka broker not available, retrying...")
-            time.sleep(5)
+            time.sleep(KAFKA_CLIENT_RETRY_DELAY_SECONDS)
 
 
 def connect_opensearch():
-    for _ in range(20):
+    for _ in range(OPENSEARCH_RETRY_MAX_ATTEMPTS):
         try:
             print("Trying to connect to OpenSearch...")
             client = OpenSearch(
-                hosts=[{"host": OPENSEARCH_HOST, "port": 9200}],
+                hosts=[{"host": OPENSEARCH_HOST, "port": OPENSEARCH_PORT}],
                 use_ssl=False,
                 verify_certs=False,
                 scheme="http",
@@ -42,10 +58,9 @@ def connect_opensearch():
 
         except Exception as e:
             print(f"OpenSearch not available, retrying... {e}")
-            time.sleep(5)
+            time.sleep(OPENSEARCH_RETRY_DELAY_SECONDS)
 
     raise Exception("OpenSearch connection failed after multiple attempts.")
-
 
 
 def main():

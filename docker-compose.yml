@@ -6,6 +6,12 @@ services:
     container_name: producer-app
     volumes:
       - ./producer:/app
+    environment:
+      WIKIMEDIA_STREAM_URL: ${WIKIMEDIA_STREAM_URL:-https://stream.wikimedia.org/v2/stream/recentchange}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker:9092}
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-wikimedia.recentchange}
+      KAFKA_CLIENT_RETRY_MAX_ATTEMPTS: ${KAFKA_CLIENT_RETRY_MAX_ATTEMPTS:-10}
+      KAFKA_CLIENT_RETRY_DELAY_SECONDS: ${KAFKA_CLIENT_RETRY_DELAY_SECONDS:-5}
     depends_on:
       broker:
         condition: service_healthy
@@ -19,6 +25,17 @@ services:
     container_name: consumer-app
     volumes:
       - ./consumer:/app
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-broker:9092}
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-wikimedia.recentchange}
+      KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-wikimedia-consumer-group}
+      OPENSEARCH_HOST: ${OPENSEARCH_HOST:-opensearch-node1}
+      OPENSEARCH_PORT: ${OPENSEARCH_PORT:-9200}
+      OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-wikimedia-changes}
+      KAFKA_CLIENT_RETRY_MAX_ATTEMPTS: ${KAFKA_CLIENT_RETRY_MAX_ATTEMPTS:-10}
+      KAFKA_CLIENT_RETRY_DELAY_SECONDS: ${KAFKA_CLIENT_RETRY_DELAY_SECONDS:-5}
+      OPENSEARCH_RETRY_MAX_ATTEMPTS: ${OPENSEARCH_RETRY_MAX_ATTEMPTS:-20}
+      OPENSEARCH_RETRY_DELAY_SECONDS: ${OPENSEARCH_RETRY_DELAY_SECONDS:-5}
     depends_on:
       broker:
         condition: service_healthy

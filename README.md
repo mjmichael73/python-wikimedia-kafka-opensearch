@@ -105,20 +105,38 @@ Inspect status: `docker compose ps` (shows `healthy` / `starting` in the **State
    curl -s "http://localhost:9200/wikimedia-changes/_search?q=title:Python&pretty" | head
    ```
 
-4. In **OpenSearch Dashboards** (http://localhost:5601), create a data view / index pattern for `wikimedia-changes` and use **Discover**.
+4. In **OpenSearch Dashboards** (http://localhost:5601), create a data view / index pattern for `wikimedia-changes` (or the value of `OPENSEARCH_INDEX` if you changed it) and use **Discover**.
 
-## Configuration (code constants)
+## Configuration (environment variables)
 
-There is no `.env` file today. Tunables are set in Python:
+Tunables are read from the process environment. Defaults match the previous hard-coded values, so `docker compose up` works with no `.env` file.
 
-- **Producer:** `WIKIMEDIA_STREAM_URL`, `KAFKA_TOPIC`, `KAFKA_BROKERS` in `producer/main.py`.
-- **Consumer:** `KAFKA_TOPIC`, `KAFKA_BROKERS`, `OPENSEARCH_HOST`, `OPENSEARCH_INDEX` in `consumer/main.py`.
+**Docker Compose:** `producer-app` and `consumer-app` receive variables from the `environment` section in `docker-compose.yml`, which uses `${VAR:-default}` substitution. Compose automatically loads a **`.env`** file in the project root (if present) for that substitution—so you can copy `.env.example` to `.env` and edit values there without changing the compose file.
 
-For Docker-only use, keep broker and OpenSearch hostnames aligned with `docker-compose.yml` service names.
+**Local runs** (without Compose): export the same variable names before `python main.py`, or use a tool of your choice to load `.env`.
+
+| Variable | Apps | Default | Purpose |
+|----------|------|---------|---------|
+| `WIKIMEDIA_STREAM_URL` | Producer | `https://stream.wikimedia.org/v2/stream/recentchange` | Wikimedia SSE endpoint. |
+| `KAFKA_BOOTSTRAP_SERVERS` | Both | `broker:9092` | Kafka brokers (comma-separated `host:port`). Use `broker:9092` inside this Compose network. |
+| `KAFKA_TOPIC` | Both | `wikimedia.recentchange` | Topic name. |
+| `KAFKA_CONSUMER_GROUP` | Consumer | `wikimedia-consumer-group` | Kafka consumer group id. |
+| `OPENSEARCH_HOST` | Consumer | `opensearch-node1` | OpenSearch hostname (compose service name). |
+| `OPENSEARCH_PORT` | Consumer | `9200` | OpenSearch HTTP port. |
+| `OPENSEARCH_INDEX` | Consumer | `wikimedia-changes` | Target index (created if missing). |
+| `KAFKA_CLIENT_RETRY_MAX_ATTEMPTS` | Both | `10` | Max attempts to create Kafka producer/consumer. |
+| `KAFKA_CLIENT_RETRY_DELAY_SECONDS` | Both | `5` | Sleep between Kafka connection retries (seconds). |
+| `OPENSEARCH_RETRY_MAX_ATTEMPTS` | Consumer | `20` | Max attempts to connect and prepare the index. |
+| `OPENSEARCH_RETRY_DELAY_SECONDS` | Consumer | `5` | Sleep between OpenSearch retries (seconds). |
+
+Shared template: **[`.env.example`](.env.example)**. Copy to `.env` to override; `.env` is gitignored.
+
+Verification commands above use the default index name `wikimedia-changes`; if you set `OPENSEARCH_INDEX`, substitute that name in URLs.
 
 ## Project layout
 
 ```
+├── .env.example          # Documented defaults; copy to `.env` to customize
 ├── docker-compose.yml    # Kafka, OpenSearch x2, Dashboards, producer, consumer
 ├── Makefile              # up_clean, up, down, clean, ps
 ├── producer/
@@ -143,7 +161,6 @@ Both apps use **Python 3.11** slim images and mount their source directories for
 
 Ideas to evolve this demo into something sturdier or closer to production patterns:
 
-- **Configuration:** Move URLs, topic names, index names, and retry limits to environment variables (and optionally a shared `.env.example`).
 - **OpenSearch mapping:** Replace dynamic mapping with an explicit index template / mapping for known Wikimedia recentchange fields (keyword vs text, dates) to improve relevance and disk use.
 - **Document identity:** Handle missing or duplicate `id` in events (fallback ID, or use Kafka offset + partition as a composite key) to avoid index errors or unintended overwrites.
 - **Consumer semantics:** Consider `enable_auto_commit=False` with explicit commits after successful indexing, and/or a dead-letter strategy for poison messages.
