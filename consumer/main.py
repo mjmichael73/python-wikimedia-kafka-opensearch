@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import time
 
@@ -6,6 +7,14 @@ from kafka import KafkaConsumer, KafkaProducer, TopicPartition
 from kafka.structs import OffsetAndMetadata
 from opensearchpy import OpenSearch
 
+from observability import (
+    configure_logging,
+    consumer_dlq_total,
+    consumer_indexed_total,
+    consumer_offsets_committed_total,
+    consumer_process_errors_total,
+    start_observability_http,
+)
 from wikimedia_mappings import (
     WIKIMEDIA_INDEX_TEMPLATE_NAME,
     wikimedia_recentchange_create_index_body,
@@ -31,9 +40,10 @@ KAFKA_CLIENT_RETRY_MAX_ATTEMPTS = _env_int("KAFKA_CLIENT_RETRY_MAX_ATTEMPTS", 10
 KAFKA_CLIENT_RETRY_DELAY_SECONDS = _env_int("KAFKA_CLIENT_RETRY_DELAY_SECONDS", 5)
 OPENSEARCH_RETRY_MAX_ATTEMPTS = _env_int("OPENSEARCH_RETRY_MAX_ATTEMPTS", 20)
 OPENSEARCH_RETRY_DELAY_SECONDS = _env_int("OPENSEARCH_RETRY_DELAY_SECONDS", 5)
+OBS_HTTP_PORT = _env_int("OBS_HTTP_PORT", 8080)
 
 
-def create_consumer():
+def create_consumer(log: logging.Logger):
     for _ in range(KAFKA_CLIENT_RETRY_MAX_ATTEMPTS):
         try:
             return KafkaConsumer(
@@ -45,11 +55,14 @@ def create_consumer():
                 enable_auto_commit=False,
             )
         except Exception:
-            print("Kafka broker not available, retrying...")
+            log.warning(
+                "Kafka broker not available, retrying",
+                extra={"event": "kafka_connect_retry"},
+            )
             time.sleep(KAFKA_CLIENT_RETRY_DELAY_SECONDS)
 
 
-def create_dlq_producer():
+def create_dlq_producer(log: logging.Logger):
     for _ in range(KAFKA_CLIENT_RETRY_MAX_ATTEMPTS):
         try:
             return KafkaProducer(
@@ -57,7 +70,10 @@ def create_dlq_producer():
                 value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
             )
         except Exception:
-            print("Kafka broker not available for DLQ producer, retrying...")
+            log.warning(
+                "Kafka broker not available for DLQ producer, retrying",
+                extra={"event": "kafka_dlq_connect_retry"},
+            )
             time.sleep(KAFKA_CLIENT_RETRY_DELAY_SECONDS)
     raise RuntimeError("Kafka DLQ producer connection failed after multiple attempts.")
 
@@ -88,10 +104,10 @@ def publish_dlq(dlq_producer, message, doc, error: Exception) -> None:
     dlq_producer.flush(timeout=30)
 
 
-def connect_opensearch():
+def connect_opensearch(log: logging.Logger):
     for _ in range(OPENSEARCH_RETRY_MAX_ATTEMPTS):
         try:
-            print("Trying to connect to OpenSearch...")
+            log.info("Connecting to OpenSearch", extra={"event": "opensearch_connect"})
             client = OpenSearch(
                 hosts=[{"host": OPENSEARCH_HOST, "port": OPENSEARCH_PORT}],
                 use_ssl=False,
@@ -107,12 +123,18 @@ def connect_opensearch():
                     index=OPENSEARCH_INDEX,
                     body=wikimedia_recentchange_create_index_body(),
                 )
-                print(f"Index {OPENSEARCH_INDEX} created with explicit mapping.")
+                log.info(
+                    "Created OpenSearch index with explicit mapping",
+                    extra={"event": "index_created", "index": OPENSEARCH_INDEX},
+                )
 
             return client
 
         except Exception as e:
-            print(f"OpenSearch not available, retrying... {e}")
+            log.warning(
+                "OpenSearch not available, retrying",
+                extra={"event": "opensearch_retry", "error": str(e)},
+            )
             time.sleep(OPENSEARCH_RETRY_DELAY_SECONDS)
 
     raise Exception("OpenSearch connection failed after multiple attempts.")
@@ -138,15 +160,38 @@ def opensearch_document_id(doc: dict, message) -> str:
 
 
 def main():
-    print("Starting Kafka Consumer...")
+    log = configure_logging("consumer")
+    ready = {"pipeline": False}
+    start_observability_http(
+        "consumer",
+        OBS_HTTP_PORT,
+        ready_fn=lambda: ready["pipeline"],
+    )
+    log.info(
+        "Starting Kafka consumer",
+        extra={"event": "startup", "obs_http_port": OBS_HTTP_PORT},
+    )
 
-    consumer = create_consumer()
-    os_client = connect_opensearch()
-    dlq_producer = create_dlq_producer() if KAFKA_DLQ_TOPIC else None
+    consumer = create_consumer(log)
+    if consumer is None:
+        log.error(
+            "Kafka consumer could not be created",
+            extra={"event": "kafka_unavailable"},
+        )
+        return
+    os_client = connect_opensearch(log)
+    dlq_producer = create_dlq_producer(log) if KAFKA_DLQ_TOPIC else None
+    ready["pipeline"] = True
     if KAFKA_DLQ_TOPIC:
-        print(f"Dead-letter topic: {KAFKA_DLQ_TOPIC} (manual offset commit after each message).")
+        log.info(
+            "Dead-letter topic enabled",
+            extra={"event": "dlq_config", "dlq_topic": KAFKA_DLQ_TOPIC},
+        )
     else:
-        print("Dead-letter topic disabled; failed messages will be skipped after commit.")
+        log.info(
+            "Dead-letter topic disabled; failed offsets still committed",
+            extra={"event": "dlq_disabled"},
+        )
 
     for message in consumer:
         doc = message.value
@@ -161,23 +206,52 @@ def main():
                 id=doc_id,
                 body=doc,
             )
-            print(f"Indexed document with ID: {doc_id}")
+            consumer_indexed_total.labels(index=OPENSEARCH_INDEX).inc()
+            log.info(
+                "Indexed document",
+                extra={
+                    "event": "indexed",
+                    "doc_id": doc_id,
+                    "index": OPENSEARCH_INDEX,
+                    "kafka_offset": message.offset,
+                },
+            )
         except Exception as e:
-            print(f"Error processing message: {e}")
+            consumer_process_errors_total.labels(phase="index_or_validate").inc()
+            log.exception(
+                "Error processing message",
+                extra={
+                    "event": "process_error",
+                    "kafka_offset": message.offset,
+                },
+            )
             if KAFKA_DLQ_TOPIC:
                 if dlq_producer is None:
-                    dlq_producer = create_dlq_producer()
+                    dlq_producer = create_dlq_producer(log)
                 try:
                     publish_dlq(dlq_producer, message, doc, e)
-                    print(f"Sent message to DLQ topic {KAFKA_DLQ_TOPIC} (offset {message.offset}).")
+                    consumer_dlq_total.labels(topic=KAFKA_DLQ_TOPIC).inc()
+                    log.warning(
+                        "Published message to DLQ",
+                        extra={
+                            "event": "dlq_publish",
+                            "dlq_topic": KAFKA_DLQ_TOPIC,
+                            "offset": message.offset,
+                        },
+                    )
                 except Exception as dlq_err:
-                    print(
-                        f"DLQ publish failed, offset not committed (will retry): {dlq_err}",
+                    log.exception(
+                        "DLQ publish failed; offset not committed",
+                        extra={"event": "dlq_failed"},
                     )
                     continue
             else:
-                print("Committing offset to skip poison message (no DLQ).")
+                log.warning(
+                    "Skipping poison message without DLQ",
+                    extra={"event": "skip_no_dlq"},
+                )
         commit_current_offset(consumer, message)
+        consumer_offsets_committed_total.labels(topic=message.topic).inc()
 
 
 if __name__ == "__main__":

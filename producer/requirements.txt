@@ -1,3 +1,4 @@
 kafka-python
+prometheus_client
 requests
 sseclient-py

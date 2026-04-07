@@ -14,21 +14,30 @@ flowchart LR
     C[Consumer Python]
     OS[(OpenSearch cluster)]
     DB[OpenSearch Dashboards]
+    PR[Prometheus]
+    GF[Grafana]
 
     WM -->|recentchange events| P
     P -->|wikimedia.recentchange| K
     K --> C
     C -->|index documents| OS
     DB -->|queries / UI| OS
+    P -->|/metrics| PR
+    C -->|/metrics| PR
+    GF -->|queries| PR
 ```
 
 | Piece | Role |
 |--------|------|
-| **Producer** (`producer/`) | `GET` SSE from `stream.wikimedia.org`, parse JSON, produce to topic `wikimedia.recentchange`. |
-| **Kafka** | Single-node KRaft mode (`apache/kafka`). Topic has 3 partitions (broker default). |
-| **Consumer** (`consumer/`) | Subscribe with **`enable_auto_commit=False`**, index to OpenSearch, then **commit offsets** per partition; failures go to a **dead-letter topic** by default. Same index template / mapping and `_id` resolution as before. |
-| **OpenSearch** | Two nodes, clustered; data persisted in named volumes. |
-| **OpenSearch Dashboards** | Web UI for Discover and queries on port **5601**. |
+| **Producer** (`producer/`) | `GET` SSE from `stream.wikimedia.org`, parse JSON, produce to topic `wikimedia.recentchange`. JSON **logs**, **`/healthz`** / **`/ready`** / **`/metrics`** on `OBS_HTTP_PORT`. |
+| **Kafka** | Single-node KRaft mode — Docker image **`apache/kafka:3.9.0`**. Topic has 3 partitions (broker default). |
+| **Consumer** (`consumer/`) | Subscribe with **`enable_auto_commit=False`**, index to OpenSearch, then **commit offsets**; DLQ by default. JSON **logs** and the same **observability HTTP** endpoints as the producer. |
+| **OpenSearch** | Two nodes — **`opensearchproject/opensearch:2.17.1`**; data in named volumes. |
+| **OpenSearch Dashboards** | **`opensearchproject/opensearch-dashboards:2.17.1`** on port **5601**. |
+| **Prometheus** | **`prom/prometheus:v2.55.1`**; scrapes app **`/metrics`** (`monitoring/prometheus/prometheus.yml`). UI on port **9090**. |
+| **Grafana** | **`grafana/grafana:11.3.0`** on port **3000**; **Prometheus** datasource and provisioned dashboards (`monitoring/grafana/`). Default login **`admin` / `admin`** (override via env). |
+
+Compose services use **pinned tags** (no `:latest`); see the comment at the top of **`docker-compose.yml`** when upgrading.
 
 ## Prerequisites
 
@@ -83,7 +92,13 @@ Inspect status: `docker compose ps` (shows `healthy` / `starting` in the **State
 |---------|------------|
 | OpenSearch REST | http://localhost:9200 |
 | OpenSearch Dashboards | http://localhost:5601 |
+| Producer observability | http://localhost:**8080** — `GET /healthz` (liveness), `GET /ready` (503 until Kafka client is ready), `GET /metrics` (Prometheus) |
+| Consumer observability | http://localhost:**8081** — same paths; `/ready` returns 503 until Kafka consumer + OpenSearch + optional DLQ producer are initialized |
+| Prometheus | http://localhost:**9090** — targets, graph UI, `/metrics` self-scrape |
+| Grafana | http://localhost:**3000** — open **Dashboards** for **Wikimedia pipeline** and **PWKO — Scrape health** (loaded from `monitoring/grafana/dashboards/`). |
 | Kafka | `localhost:9092` is **not** published by default; clients run **inside** the compose network and use `broker:9092` |
+
+Host ports **`8080`** / **`8081`** are configurable via `PRODUCER_OBS_HOST_PORT` and `CONSUMER_OBS_HOST_PORT` (see `.env.example`). Inside each app container the server listens on **`OBS_HTTP_PORT`** (default `8080`). **`PROMETHEUS_HOST_PORT`** (default **9090**) and **`GRAFANA_HOST_PORT`** (default **3000**) control Prometheus and Grafana.
 
 ## Verify the pipeline
 
@@ -129,6 +144,14 @@ Tunables are read from the process environment. Defaults match the previous hard
 | `KAFKA_CLIENT_RETRY_DELAY_SECONDS` | Both | `5` | Sleep between Kafka connection retries (seconds). |
 | `OPENSEARCH_RETRY_MAX_ATTEMPTS` | Consumer | `20` | Max attempts to connect and prepare the index. |
 | `OPENSEARCH_RETRY_DELAY_SECONDS` | Consumer | `5` | Sleep between OpenSearch retries (seconds). |
+| `LOG_LEVEL` | Both | `INFO` | Root log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
+| `OBS_HTTP_PORT` | Both | `8080` | Port inside the container for health + Prometheus metrics HTTP server. |
+| `PRODUCER_OBS_HOST_PORT` | Compose | `8080` | Published host port for **producer** observability (`host:OBS_HTTP_PORT`). |
+| `CONSUMER_OBS_HOST_PORT` | Compose | `8081` | Published host port for **consumer** observability. |
+| `PROMETHEUS_HOST_PORT` | Compose | `9090` | Prometheus UI and API on the host. |
+| `GRAFANA_HOST_PORT` | Compose | `3000` | Grafana UI on the host. |
+| `GRAFANA_ADMIN_USER` | Compose | `admin` | Grafana admin username. |
+| `GRAFANA_ADMIN_PASSWORD` | Compose | `admin` | Grafana admin password (**change for anything beyond local demo**). |
 
 Shared template: **[`.env.example`](.env.example)**. Copy to `.env` to override; `.env` is gitignored.
 
@@ -162,21 +185,46 @@ If indexing (or validation) raises, the consumer **publishes a JSON envelope** t
 
 Set **`KAFKA_DLQ_TOPIC`** to an empty string to turn off DLQ publishing; failed messages are logged and the offset is still committed (no infinite retry on poison payloads).
 
+### Observability (logs, health, Prometheus)
+
+- **Structured logging:** Both apps log **one JSON object per line** to stdout (`timestamp`, `level`, `logger`, `message`, `service`, `event`, and any `extra={...}` fields). `PYTHONUNBUFFERED=1` is set in Compose for timely log shipping.
+- **HTTP:** A small background **`ThreadingHTTPServer`** serves **`/healthz`** and **`/health`** (always 200 if the process is up), **`/ready`** / **`/readiness`** (503 until the app finishes startup dependencies—Kafka producer ready on the producer; consumer + OpenSearch + DLQ producer ready on the consumer), and **`/metrics`** in the **Prometheus text exposition format** (`prometheus_client`).
+- **Metrics (examples):** `wikimedia_producer_events_total`, `wikimedia_producer_errors_total`, `wikimedia_consumer_indexed_total`, `wikimedia_consumer_dlq_total`, `wikimedia_consumer_process_errors_total`, `wikimedia_consumer_offsets_committed_total`.
+
+Implementation lives in **`producer/observability.py`** and **`consumer/observability.py`**.
+
+**Prometheus + Grafana:** Compose services **`prometheus`** and **`grafana`** scrape the app **`/metrics`** endpoints on the Docker network (`producer-app:8080`, `consumer-app:8080`). Dashboards are **JSON** files auto-loaded at Grafana start:
+
+| Dashboard | File | Contents (summary) |
+|-----------|------|---------------------|
+| **Wikimedia pipeline (Kafka / OpenSearch)** | `monitoring/grafana/dashboards/pwko-pipeline.json` | Producer throughput & error rates; consumer index/offset rates; DLQ and process-error totals; `up` for scrape targets. |
+| **PWKO — Scrape health** | `monitoring/grafana/dashboards/pwko-scrape-health.json` | Scrape latency and a table of target **up** state. |
+
+After `docker compose up`, open Grafana → **Dashboards** (folder *General*, tags `pwko`). Edit the JSON under `monitoring/grafana/dashboards/` and restart Grafana or use **Save** (with **allowUiUpdates** enabled in provisioning) to iterate.
+
 ## Project layout
 
 ```
 ├── .env.example          # Documented defaults; copy to `.env` to customize
-├── docker-compose.yml    # Kafka, OpenSearch x2, Dashboards, producer, consumer
+├── docker-compose.yml    # Full stack + Prometheus + Grafana
 ├── Makefile              # up_clean, up, down, clean, ps
+├── monitoring/
+│   ├── prometheus/
+│   │   └── prometheus.yml   # Scrape producer-app + consumer-app :8080/metrics
+│   └── grafana/
+│       ├── dashboards/       # Provisioned dashboard JSON (pwko-*.json)
+│       └── provisioning/     # Datasource + dashboard providers
 ├── producer/
 │   ├── Dockerfile
 │   ├── main.py
-│   └── requirements.txt  # kafka-python, requests, sseclient-py
+│   ├── observability.py   # JSON logging + health/metrics HTTP
+│   └── requirements.txt   # kafka-python, prometheus_client, requests, sseclient-py
 └── consumer/
     ├── Dockerfile
     ├── main.py
+    ├── observability.py
     ├── wikimedia_mappings.py  # Index template + mapping for recentchange
-    └── requirements.txt  # kafka-python, opensearch-py
+    └── requirements.txt  # kafka-python, opensearch-py, prometheus_client
 ```
 
 Both apps use **Python 3.11** slim images and mount their source directories for quick iteration.
@@ -187,15 +235,15 @@ Both apps use **Python 3.11** slim images and mount their source directories for
 - **Consumer logs “OpenSearch not available”** — Compose should wait until both OpenSearch nodes report green/yellow before the consumer starts; if you still see this, the cluster may be slow or unhealthy—check `docker compose ps` and `curl -s http://localhost:9200/_cluster/health?pretty`. The consumer also retries in code.
 - **No documents in OpenSearch** — Confirm `consumer-app` is running (`docker compose ps` or `make ps`). Confirm Wikimedia stream is reachable from the producer container.
 - **Out of memory** — Reduce `OPENSEARCH_JAVA_OPTS` in `docker-compose.yml` or run a single OpenSearch node for lighter setups.
+- **Producer observability URL not reachable** — The producer container may **exit** when the Wikimedia SSE stream closes or errors; host port **8080** is only served while the process is running. The consumer stays up longer and is easier to probe on **8081**.
 
 ## TODO / improvement proposals
 
 Ideas to evolve this demo into something sturdier or closer to production patterns:
 
-- **Observability:** Replace `print` with structured logging; add Prometheus metrics or simple health HTTP endpoints for producer/consumer.
 - **Testing:** Add unit tests for serialization/deserialization and integration tests against Kafka/OpenSearch (e.g. Testcontainers).
 - **CI:** Linting (ruff/black), type hints (mypy), and a GitHub Action (or similar) that builds images and runs tests.
 - **Security:** Document a “secure mode” path enabling OpenSearch security plugin, TLS, and auth—separate from this educational default.
-- **Operations:** Pin image tags instead of `:latest`; document backup/restore of OpenSearch volumes; add a minimal `docker compose` profile for single-node OpenSearch for low-RAM machines.
+- **Operations:** Document backup/restore of OpenSearch volumes; add a minimal `docker compose` profile for single-node OpenSearch for low-RAM machines.
 
 Contributions that tackle items above are welcome if you fork or extend this repository.
