@@ -26,7 +26,7 @@ flowchart LR
 |--------|------|
 | **Producer** (`producer/`) | `GET` SSE from `stream.wikimedia.org`, parse JSON, produce to topic `wikimedia.recentchange`. |
 | **Kafka** | Single-node KRaft mode (`apache/kafka`). Topic has 3 partitions (broker default). |
-| **Consumer** (`consumer/`) | Subscribe to the topic, create index `wikimedia-changes` if missing, index each event by Wikimedia change `id`. |
+| **Consumer** (`consumer/`) | Subscribe to the topic, register a composable index template (`wikimedia-*`) and create `wikimedia-changes` with an explicit **mapping** for `mediawiki/recentchange` fields, then index each event by Wikimedia change `id`. |
 | **OpenSearch** | Two nodes, clustered; data persisted in named volumes. |
 | **OpenSearch Dashboards** | Web UI for Discover and queries on port **5601**. |
 
@@ -133,6 +133,16 @@ Shared template: **[`.env.example`](.env.example)**. Copy to `.env` to override;
 
 Verification commands above use the default index name `wikimedia-changes`; if you set `OPENSEARCH_INDEX`, substitute that name in URLs.
 
+### OpenSearch mapping and index template
+
+Wikimedia [recentchange](https://github.com/wikimedia/mediawiki-event-schemas/blob/master/jsonschema/mediawiki/recentchange/current.yaml) events are indexed with **explicit field types** (for example `title` as `text` with a `keyword` subfield for sorting/aggregations, `meta.dt` as `date`, filters as `keyword`/`boolean`/`integer`, and `log_params` stored but not mapped per-field to avoid noisy dynamic objects).
+
+- **Composable index template** `wikimedia-recentchange` matches new indices named `wikimedia-*` so extra indices created later inherit the same settings/mappings.
+- **New index creation** from the consumer uses the same JSON payload as the template (`consumer/wikimedia_mappings.py`), so the default `OPENSEARCH_INDEX` gets the mapping even before any document is indexed.
+- **`dynamic` is `false`**: fields not declared in the mapping remain in `_source` only (fewer surprise mappings, typically smaller and more predictable indexes). Extend `wikimedia_mappings.py` if you need to query new properties.
+
+If the index already existed from an older run (empty or dynamic mapping), OpenSearch will **not** retrofit this mapping: delete the index (or reindex) and restart the consumer—see **Troubleshooting**.
+
 ## Project layout
 
 ```
@@ -146,6 +156,7 @@ Verification commands above use the default index name `wikimedia-changes`; if y
 └── consumer/
     ├── Dockerfile
     ├── main.py
+    ├── wikimedia_mappings.py  # Index template + mapping for recentchange
     └── requirements.txt  # kafka-python, opensearch-py
 ```
 
@@ -153,6 +164,7 @@ Both apps use **Python 3.11** slim images and mount their source directories for
 
 ## Troubleshooting
 
+- **Mapping did not update after upgrading** — Indices keep their original mapping. For example: `curl -X DELETE "http://localhost:9200/wikimedia-changes"` (adjust if you changed `OPENSEARCH_INDEX`), then `docker compose restart consumer-app` so the index is recreated with the explicit mapping.
 - **Consumer logs “OpenSearch not available”** — Compose should wait until both OpenSearch nodes report green/yellow before the consumer starts; if you still see this, the cluster may be slow or unhealthy—check `docker compose ps` and `curl -s http://localhost:9200/_cluster/health?pretty`. The consumer also retries in code.
 - **No documents in OpenSearch** — Confirm `consumer-app` is running (`docker compose ps` or `make ps`). Confirm Wikimedia stream is reachable from the producer container.
 - **Out of memory** — Reduce `OPENSEARCH_JAVA_OPTS` in `docker-compose.yml` or run a single OpenSearch node for lighter setups.
@@ -161,7 +173,6 @@ Both apps use **Python 3.11** slim images and mount their source directories for
 
 Ideas to evolve this demo into something sturdier or closer to production patterns:
 
-- **OpenSearch mapping:** Replace dynamic mapping with an explicit index template / mapping for known Wikimedia recentchange fields (keyword vs text, dates) to improve relevance and disk use.
 - **Document identity:** Handle missing or duplicate `id` in events (fallback ID, or use Kafka offset + partition as a composite key) to avoid index errors or unintended overwrites.
 - **Consumer semantics:** Consider `enable_auto_commit=False` with explicit commits after successful indexing, and/or a dead-letter strategy for poison messages.
 - **Observability:** Replace `print` with structured logging; add Prometheus metrics or simple health HTTP endpoints for producer/consumer.

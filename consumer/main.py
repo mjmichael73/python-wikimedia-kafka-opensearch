@@ -5,6 +5,12 @@ import time
 from kafka import KafkaConsumer
 from opensearchpy import OpenSearch
 
+from wikimedia_mappings import (
+    WIKIMEDIA_INDEX_TEMPLATE_NAME,
+    wikimedia_recentchange_create_index_body,
+    wikimedia_recentchange_index_template_body,
+)
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -50,9 +56,16 @@ def connect_opensearch():
                 verify_certs=False,
                 scheme="http",
             )
+            client.indices.put_index_template(
+                name=WIKIMEDIA_INDEX_TEMPLATE_NAME,
+                body=wikimedia_recentchange_index_template_body(),
+            )
             if not client.indices.exists(index=OPENSEARCH_INDEX):
-                client.indices.create(index=OPENSEARCH_INDEX)
-                print(f"Index {OPENSEARCH_INDEX} created.")
+                client.indices.create(
+                    index=OPENSEARCH_INDEX,
+                    body=wikimedia_recentchange_create_index_body(),
+                )
+                print(f"Index {OPENSEARCH_INDEX} created with explicit mapping.")
 
             return client
 
