@@ -76,6 +76,25 @@ def connect_opensearch():
     raise Exception("OpenSearch connection failed after multiple attempts.")
 
 
+def opensearch_document_id(doc: dict, message) -> str:
+    """
+    Choose a stable OpenSearch _id: WMF meta.id (event UUID), else recentchange id
+    (rcid), else Kafka topic/partition/offset so every consumed record is indexable.
+    """
+    meta = doc.get("meta")
+    if isinstance(meta, dict):
+        mid = meta.get("id")
+        if mid is not None and str(mid).strip() != "":
+            return str(mid)
+    rid = doc.get("id")
+    if rid is not None:
+        return str(rid)
+    topic = getattr(message, "topic", None) or KAFKA_TOPIC
+    partition = message.partition
+    offset = message.offset
+    return f"kafka:{topic}:{partition}:{offset}"
+
+
 def main():
     print("Starting Kafka Consumer...")
 
@@ -85,7 +104,7 @@ def main():
     for message in consumer:
         try:
             doc = message.value
-            doc_id = doc.get("id")
+            doc_id = opensearch_document_id(doc, message)
             os_client.index(
                 index=OPENSEARCH_INDEX,
                 id=doc_id,

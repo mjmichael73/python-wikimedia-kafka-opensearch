@@ -26,7 +26,7 @@ flowchart LR
 |--------|------|
 | **Producer** (`producer/`) | `GET` SSE from `stream.wikimedia.org`, parse JSON, produce to topic `wikimedia.recentchange`. |
 | **Kafka** | Single-node KRaft mode (`apache/kafka`). Topic has 3 partitions (broker default). |
-| **Consumer** (`consumer/`) | Subscribe to the topic, register a composable index template (`wikimedia-*`) and create `wikimedia-changes` with an explicit **mapping** for `mediawiki/recentchange` fields, then index each event by Wikimedia change `id`. |
+| **Consumer** (`consumer/`) | Subscribe to the topic, register a composable index template (`wikimedia-*`) and create `wikimedia-changes` with an explicit **mapping** for `mediawiki/recentchange` fields, then index each event with a resolved `_id` (`meta.id`, then `id`, else Kafka offset key). |
 | **OpenSearch** | Two nodes, clustered; data persisted in named volumes. |
 | **OpenSearch Dashboards** | Web UI for Discover and queries on port **5601**. |
 
@@ -143,6 +143,16 @@ Wikimedia [recentchange](https://github.com/wikimedia/mediawiki-event-schemas/bl
 
 If the index already existed from an older run (empty or dynamic mapping), OpenSearch will **not** retrofit this mapping: delete the index (or reindex) and restart the consumer—see **Troubleshooting**.
 
+### Document identity (`_id` in OpenSearch)
+
+Each indexed document gets an explicit `_id` so missing Wikimedia ids do not break indexing, and natural keys are preferred over Kafka position where possible:
+
+1. **`meta.id`** — WMF event UUID (when `meta` is present and `meta.id` is non-empty). Prefer this for stable, idempotent re-indexing of the same event and to avoid cross-event collisions on `id` (rcid) in odd payloads.
+2. **`id`** — MediaWiki recentchange id (rcid) when set (including `0` if it ever appears).
+3. **Fallback** — `kafka:<topic>:<partition>:<offset>` from the consumer record so every consumed message has a unique key even when both ids are absent.
+
+Replays of the **same** event (same `meta.id` or same `id`) overwrite the same OpenSearch document, which is usually desirable; distinct Kafka records with missing ids each get a distinct fallback `_id`.
+
 ## Project layout
 
 ```
@@ -173,7 +183,6 @@ Both apps use **Python 3.11** slim images and mount their source directories for
 
 Ideas to evolve this demo into something sturdier or closer to production patterns:
 
-- **Document identity:** Handle missing or duplicate `id` in events (fallback ID, or use Kafka offset + partition as a composite key) to avoid index errors or unintended overwrites.
 - **Consumer semantics:** Consider `enable_auto_commit=False` with explicit commits after successful indexing, and/or a dead-letter strategy for poison messages.
 - **Observability:** Replace `print` with structured logging; add Prometheus metrics or simple health HTTP endpoints for producer/consumer.
 - **Testing:** Add unit tests for serialization/deserialization and integration tests against Kafka/OpenSearch (e.g. Testcontainers).
