@@ -59,7 +59,23 @@ docker compose up --build -d
 | `make clean` | Stop and remove containers **and** volumes |
 | `make ps` | Show running services |
 
-Services start in dependency order for Kafka; the producer and consumer **retry** Kafka/OpenSearch in a loop until connections succeed (see `producer/main.py` and `consumer/main.py`).
+### Compose health and startup order
+
+`docker-compose.yml` defines **healthchecks** so Compose can wait for dependencies before starting the Python apps:
+
+| Service | Health check |
+|---------|----------------|
+| **broker** | `kafka-broker-api-versions.sh --bootstrap-server broker:9092` (KRaft broker accepting clients). |
+| **opensearch-node1** / **opensearch-node2** | HTTP `/_cluster/health`; status must be **green** or **yellow** (cluster usable for indexing). |
+
+**`depends_on`** with `condition: service_healthy`:
+
+- **producer-app** starts only after **broker** is healthy.
+- **consumer-app** starts only after **broker**, **opensearch-node1**, and **opensearch-node2** are all healthy.
+
+`start_period` / `retries` on those healthchecks allow Kafka and the two-node OpenSearch cluster time to finish booting. The producer and consumer still contain **in-app retry loops** for transient failures after startup (see `producer/main.py` and `consumer/main.py`).
+
+Inspect status: `docker compose ps` (shows `healthy` / `starting` in the **State** column when supported).
 
 ## Service endpoints (host machine)
 
@@ -119,7 +135,7 @@ Both apps use **Python 3.11** slim images and mount their source directories for
 
 ## Troubleshooting
 
-- **Consumer logs “OpenSearch not available”** — Normal on first boot; OpenSearch can take a minute. The consumer retries.
+- **Consumer logs “OpenSearch not available”** — Compose should wait until both OpenSearch nodes report green/yellow before the consumer starts; if you still see this, the cluster may be slow or unhealthy—check `docker compose ps` and `curl -s http://localhost:9200/_cluster/health?pretty`. The consumer also retries in code.
 - **No documents in OpenSearch** — Confirm `consumer-app` is running (`docker compose ps` or `make ps`). Confirm Wikimedia stream is reachable from the producer container.
 - **Out of memory** — Reduce `OPENSEARCH_JAVA_OPTS` in `docker-compose.yml` or run a single OpenSearch node for lighter setups.
 
@@ -127,7 +143,6 @@ Both apps use **Python 3.11** slim images and mount their source directories for
 
 Ideas to evolve this demo into something sturdier or closer to production patterns:
 
-- **Compose reliability:** Add Docker Compose `healthcheck` entries for Kafka and OpenSearch; use `depends_on: condition: service_healthy` so producer/consumer start only when dependencies are ready instead of relying only on retry loops.
 - **Configuration:** Move URLs, topic names, index names, and retry limits to environment variables (and optionally a shared `.env.example`).
 - **OpenSearch mapping:** Replace dynamic mapping with an explicit index template / mapping for known Wikimedia recentchange fields (keyword vs text, dates) to improve relevance and disk use.
 - **Document identity:** Handle missing or duplicate `id` in events (fallback ID, or use Kafka offset + partition as a composite key) to avoid index errors or unintended overwrites.
