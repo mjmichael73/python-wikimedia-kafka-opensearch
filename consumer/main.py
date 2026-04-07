@@ -98,7 +98,9 @@ def publish_dlq(dlq_producer, message, doc, error: Exception) -> None:
         "partition": message.partition,
         "offset": message.offset,
         "timestamp": message.timestamp,
-        "key": (key.decode("utf-8", errors="replace") if isinstance(key, (bytes, bytearray)) else key),
+        "key": (
+            key.decode("utf-8", errors="replace") if isinstance(key, (bytes, bytearray)) else key
+        ),
         "document": doc,
     }
     dlq_producer.send(KAFKA_DLQ_TOPIC, value=envelope)
@@ -225,7 +227,7 @@ def main():
                             "offset": message.offset,
                         },
                     )
-                except Exception as dlq_err:
+                except Exception:
                     log.exception(
                         "DLQ publish failed; offset not committed",
                         extra={"event": "dlq_failed"},

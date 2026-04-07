@@ -59,9 +59,7 @@ def wait_opensearch_ready(host: str, port: int, timeout_s: float = 120.0) -> Non
         try:
             with urllib.request.urlopen(url, timeout=3) as resp:
                 body = resp.read().decode()
-                if '"status"' in body and (
-                    '"green"' in body or '"yellow"' in body
-                ):
+                if '"status"' in body and ('"green"' in body or '"yellow"' in body):
                     return
         except (urllib.error.URLError, TimeoutError, ConnectionResetError) as e:
             last_err = e

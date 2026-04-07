@@ -208,8 +208,9 @@ After `docker compose up`, open Grafana → **Dashboards** (folder *General*, ta
 ├── .env.example          # Documented defaults; copy to `.env` to customize
 ├── docker-compose.yml    # Full stack + Prometheus + Grafana + test-runner (profile test)
 ├── Dockerfile.test       # Python 3.11 test image (requirements-dev.txt)
-├── Makefile              # up_clean, up, down, clean, ps, test, test-integration
-├── requirements-dev.txt  # pytest, testcontainers, app libs for tests
+├── Makefile              # up_clean, up, down, clean, ps, lint, lint-docker, test, test-integration
+├── .github/workflows/ci.yml  # GitHub Actions: lint (ruff/black/mypy), Docker build, make test + test-integration
+├── requirements-dev.txt  # pytest, testcontainers, ruff, black, mypy, app libs for tests
 ├── tests/                # Unit + integration (Testcontainers) tests
 ├── monitoring/
 │   ├── prometheus/
@@ -235,10 +236,16 @@ Both apps use **Python 3.11** slim images and mount their source directories for
 
 ## Testing
 
+**Linting and types (host Python):** after `pip install -r requirements-dev.txt`, run `make lint` (**ruff** check, **black** `--check`, **mypy** per app directory so `producer/main.py` and `consumer/main.py` are not merged as duplicate `main` modules). To run the same checks inside the test image: `make lint-docker` (builds/runs `test-runner`).
+
+**CI:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs lint on the runner, then **`docker compose build`** for **`producer-app`**, **`consumer-app`**, and **`test-runner`**, then **`make test`** and **`make test-integration`**.
+
 Tests run **inside Docker** via the Compose service **`test-runner`** (profile **`test`**) so the runtime matches the apps and **integration** tests can use [Testcontainers](https://testcontainers.com/) against the host Docker daemon.
 
 | Command | Purpose |
 |---------|---------|
+| `make lint` | Ruff, Black (check), mypy (`producer/` and `consumer/` separately). |
+| `make lint-docker` | Same as `make lint` inside the `test-runner` container. |
 | `make test` | Unit tests only (`pytest` without `--integration`; fast). |
 | `make test-integration` | All tests including integration (**Kafka + OpenSearch** containers; needs a working Docker socket). |
 | `make test-build` | Build the `test-runner` image only. |
@@ -267,7 +274,7 @@ Dev dependencies are listed in **`requirements-dev.txt`**; the image is defined 
 
 Ideas to evolve this demo into something sturdier or closer to production patterns:
 
-- **CI:** Linting (ruff/black), type hints (mypy), and a GitHub Action (or similar) that builds images and runs **`make test`** / **`make test-integration`**.
+- **CI:** Further automation (e.g. image scan, publish to a registry) on top of [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 - **Security:** Document a “secure mode” path enabling OpenSearch security plugin, TLS, and auth—separate from this educational default.
 - **Operations:** Document backup/restore of OpenSearch volumes; add a minimal `docker compose` profile for single-node OpenSearch for low-RAM machines.
 

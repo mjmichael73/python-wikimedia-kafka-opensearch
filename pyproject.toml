@@ -1,0 +1,46 @@
+# Lint / format / type-check configuration (see `requirements-dev.txt` and CI).
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["producer", "consumer", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  "UP",
+  "B",
+  "SIM",
+]
+ignore = ["SIM108"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["document_id", "observability", "wikimedia_mappings"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+include = '\.pyi?$'
+extend-exclude = "/(\\.(eggs|git|hg|mypy_cache|tox|venv)|build|dist)/"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+# Shared `overrides` list covers both apps; each per-directory mypy run only uses a subset.
+warn_unused_configs = false
+disallow_untyped_defs = false
+check_untyped_defs = true
+show_error_codes = true
+# Apps use flat imports (WORKDIR = app dir in Docker). Type-check each app directory separately (see Makefile `lint`).
+
+[[tool.mypy.overrides]]
+module = [
+  "kafka.*",
+  "opensearchpy.*",
+  "prometheus_client.*",
+  "requests.*",
+  "sseclient.*",
+]
+ignore_missing_imports = true

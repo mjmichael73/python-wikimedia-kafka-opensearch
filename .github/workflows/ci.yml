@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install dev tools
+        run: pip install -r requirements-dev.txt
+      - name: Ruff
+        run: ruff check producer consumer tests
+      - name: Black
+        run: black --check producer consumer tests
+      - name: mypy (producer)
+        run: cd producer && mypy main.py observability.py
+      - name: mypy (consumer)
+        run: cd consumer && mypy main.py document_id.py observability.py wikimedia_mappings.py
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build application images
+        run: docker compose build producer-app consumer-app
+      - name: Build test-runner image
+        run: docker compose --profile test build test-runner
+      - name: Unit tests
+        run: make test
+      - name: Integration tests
+        run: make test-integration

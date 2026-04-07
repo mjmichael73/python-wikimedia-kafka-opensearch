@@ -2,10 +2,10 @@ import json
 import logging
 import os
 import threading
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable
 
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest, REGISTRY
+from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, Counter, generate_latest
 
 KNOWN_LOGRECORD_KEYS = frozenset(
     {

@@ -100,9 +100,7 @@ def test_kafka_to_opensearch_index_roundtrip(kafka_bootstrap, opensearch_host_po
         scheme="http",
     )
     try:
-        os_client.indices.create(
-            index=index, body=wikimedia_recentchange_create_index_body()
-        )
+        os_client.indices.create(index=index, body=wikimedia_recentchange_create_index_body())
         doc_id = opensearch_document_id(msg.value, msg)
         os_client.index(index=index, id=doc_id, body=msg.value)
         os_client.indices.refresh(index=index)

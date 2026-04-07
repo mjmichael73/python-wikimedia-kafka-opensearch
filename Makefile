@@ -8,6 +8,17 @@ down:
 	@docker compose down --remove-orphans
 ps:
 	@docker compose ps
+lint:
+	ruff check producer consumer tests
+	black --check producer consumer tests
+	cd producer && mypy main.py observability.py
+	cd consumer && mypy main.py document_id.py observability.py wikimedia_mappings.py
+lint-docker:
+	docker compose --profile test run --rm test-runner sh -ec "\
+		ruff check producer consumer tests && \
+		black --check producer consumer tests && \
+		cd producer && mypy main.py observability.py && \
+		cd ../consumer && mypy main.py document_id.py observability.py wikimedia_mappings.py"
 test:
 	@docker compose --profile test run --rm test-runner pytest tests/ -v
 test-integration:

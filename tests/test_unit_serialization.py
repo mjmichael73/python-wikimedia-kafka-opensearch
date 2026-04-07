@@ -59,19 +59,13 @@ def test_opensearch_document_id_zero_rcid():
 def test_opensearch_document_id_kafka_fallback():
     doc = {}
     msg = SimpleNamespace(topic=None, partition=2, offset=99)
-    assert (
-        opensearch_document_id(doc, msg, kafka_topic_fallback="mytopic")
-        == "kafka:mytopic:2:99"
-    )
+    assert opensearch_document_id(doc, msg, kafka_topic_fallback="mytopic") == "kafka:mytopic:2:99"
 
 
 def test_opensearch_document_id_message_topic_wins():
     doc = {}
     msg = SimpleNamespace(topic="t1", partition=1, offset=3)
-    assert (
-        opensearch_document_id(doc, msg, kafka_topic_fallback="ignored")
-        == "kafka:t1:1:3"
-    )
+    assert opensearch_document_id(doc, msg, kafka_topic_fallback="ignored") == "kafka:t1:1:3"
 
 
 def test_wikimedia_index_spec_has_expected_mapping_controls():
