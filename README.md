@@ -26,7 +26,7 @@ flowchart LR
 |--------|------|
 | **Producer** (`producer/`) | `GET` SSE from `stream.wikimedia.org`, parse JSON, produce to topic `wikimedia.recentchange`. |
 | **Kafka** | Single-node KRaft mode (`apache/kafka`). Topic has 3 partitions (broker default). |
-| **Consumer** (`consumer/`) | Subscribe to the topic, register a composable index template (`wikimedia-*`) and create `wikimedia-changes` with an explicit **mapping** for `mediawiki/recentchange` fields, then index each event with a resolved `_id` (`meta.id`, then `id`, else Kafka offset key). |
+| **Consumer** (`consumer/`) | Subscribe with **`enable_auto_commit=False`**, index to OpenSearch, then **commit offsets** per partition; failures go to a **dead-letter topic** by default. Same index template / mapping and `_id` resolution as before. |
 | **OpenSearch** | Two nodes, clustered; data persisted in named volumes. |
 | **OpenSearch Dashboards** | Web UI for Discover and queries on port **5601**. |
 
@@ -121,6 +121,7 @@ Tunables are read from the process environment. Defaults match the previous hard
 | `KAFKA_BOOTSTRAP_SERVERS` | Both | `broker:9092` | Kafka brokers (comma-separated `host:port`). Use `broker:9092` inside this Compose network. |
 | `KAFKA_TOPIC` | Both | `wikimedia.recentchange` | Topic name. |
 | `KAFKA_CONSUMER_GROUP` | Consumer | `wikimedia-consumer-group` | Kafka consumer group id. |
+| `KAFKA_DLQ_TOPIC` | Consumer | `wikimedia.recentchange.dlq` | Topic for poison / failed documents (JSON envelope with error + payload). Set to empty to disable DLQ (offset is still committed so the consumer does not stall). |
 | `OPENSEARCH_HOST` | Consumer | `opensearch-node1` | OpenSearch hostname (compose service name). |
 | `OPENSEARCH_PORT` | Consumer | `9200` | OpenSearch HTTP port. |
 | `OPENSEARCH_INDEX` | Consumer | `wikimedia-changes` | Target index (created if missing). |
@@ -153,6 +154,14 @@ Each indexed document gets an explicit `_id` so missing Wikimedia ids do not bre
 
 Replays of the **same** event (same `meta.id` or same `id`) overwrite the same OpenSearch document, which is usually desirable; distinct Kafka records with missing ids each get a distinct fallback `_id`.
 
+### Consumer semantics (commits and dead-letter queue)
+
+The consumer disables Kafka’s **auto-commit** and, after each message, calls **`commit()`** with an explicit **`OffsetAndMetadata`** for that record’s `TopicPartition` (next offset = `message.offset + 1`). Successful OpenSearch indexing and the “skip after handling failure” paths both advance the offset so partitions do not hang indefinitely.
+
+If indexing (or validation) raises, the consumer **publishes a JSON envelope** to **`KAFKA_DLQ_TOPIC`** (default `wikimedia.recentchange.dlq`): error string and type, source `topic` / `partition` / `offset`, record `timestamp`, optional `key`, and the **`document`** body. Only after a successful DLQ publish does it commit when the main path failed. If DLQ **publish** fails, the offset is **not** committed so the message is retried.
+
+Set **`KAFKA_DLQ_TOPIC`** to an empty string to turn off DLQ publishing; failed messages are logged and the offset is still committed (no infinite retry on poison payloads).
+
 ## Project layout
 
 ```
@@ -183,7 +192,6 @@ Both apps use **Python 3.11** slim images and mount their source directories for
 
 Ideas to evolve this demo into something sturdier or closer to production patterns:
 
-- **Consumer semantics:** Consider `enable_auto_commit=False` with explicit commits after successful indexing, and/or a dead-letter strategy for poison messages.
 - **Observability:** Replace `print` with structured logging; add Prometheus metrics or simple health HTTP endpoints for producer/consumer.
 - **Testing:** Add unit tests for serialization/deserialization and integration tests against Kafka/OpenSearch (e.g. Testcontainers).
 - **CI:** Linting (ruff/black), type hints (mypy), and a GitHub Action (or similar) that builds images and runs tests.

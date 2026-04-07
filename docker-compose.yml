@@ -36,6 +36,7 @@ services:
       KAFKA_CLIENT_RETRY_DELAY_SECONDS: ${KAFKA_CLIENT_RETRY_DELAY_SECONDS:-5}
       OPENSEARCH_RETRY_MAX_ATTEMPTS: ${OPENSEARCH_RETRY_MAX_ATTEMPTS:-20}
       OPENSEARCH_RETRY_DELAY_SECONDS: ${OPENSEARCH_RETRY_DELAY_SECONDS:-5}
+      KAFKA_DLQ_TOPIC: ${KAFKA_DLQ_TOPIC:-wikimedia.recentchange.dlq}
     depends_on:
       broker:
         condition: service_healthy
